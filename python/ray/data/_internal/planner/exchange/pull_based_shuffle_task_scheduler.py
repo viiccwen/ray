@@ -1,11 +1,12 @@
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ray._private.ray_constants import CALLER_MEMORY_USAGE_PER_OBJECT_REF
 from ray.data._internal.execution.interfaces import BlockEntry, RefBundle, TaskContext
 from ray.data._internal.planner.exchange.interfaces import (
     ExchangeTaskScheduler,
     ExchangeTaskSpec,
+    encode_map_task_kwargs,
 )
 from ray.data._internal.remote_fn import cached_remote_fn
 from ray.data._internal.stats import StatsDict
@@ -39,6 +40,7 @@ class PullBasedShuffleTaskScheduler(ExchangeTaskScheduler):
         map_ray_remote_args: Optional[Dict[str, Any]] = None,
         reduce_ray_remote_args: Optional[Dict[str, Any]] = None,
         _debug_limit_execution_to_num_blocks: Optional[int] = None,
+        map_task_kwargs_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> Tuple[List[RefBundle], StatsDict]:
 
         # TODO: eagerly delete the input and map output block references in order to
@@ -89,7 +91,17 @@ class PullBasedShuffleTaskScheduler(ExchangeTaskScheduler):
             shuffle_map.options(
                 **map_ray_remote_args,
                 num_returns=1 + output_num_blocks,
-            ).remote(i, block, output_num_blocks, *self._exchange_spec._map_args)
+            ).remote(
+                i,
+                block,
+                output_num_blocks,
+                *self._exchange_spec._map_args,
+                **(
+                    encode_map_task_kwargs(map_task_kwargs_fn())
+                    if map_task_kwargs_fn
+                    else {}
+                ),
+            )
             for i, block in enumerate(input_blocks_list)
         ]
 

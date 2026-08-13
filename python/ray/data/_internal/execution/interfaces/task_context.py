@@ -1,7 +1,7 @@
 import contextlib
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional
 
 if TYPE_CHECKING:
     from ray.data._internal.execution.operators.map_transformer import MapTransformer
@@ -27,8 +27,9 @@ class TaskContext:
     # TODO(chengsu): clean it up from TaskContext with new optimizer framework.
     sub_progress_bar_dict: Optional[Dict[str, "BaseProgressBar"]] = None
 
-    # NOTE(hchen): `upstream_map_transformer` and `upstream_map_ray_remote_args`
-    # are only used for `RandomShuffle`. DO NOT use them for other operators.
+    # NOTE(hchen): `upstream_map_transformer`, `upstream_map_ray_remote_args`, and
+    # `upstream_map_task_kwargs_fn` are only used for `RandomShuffle` and
+    # `Repartition`. DO NOT use them for other operators.
     # Ideally, they should be handled by the optimizer, and should be transparent
     # to the specific operators.
     # But for `RandomShuffle`, the AllToAllOperator doesn't do the shuffle itself.
@@ -49,6 +50,9 @@ class TaskContext:
 
     # Additional keyword arguments passed to the task.
     kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    # Returns additional top-level task arguments for each fused upstream map task.
+    upstream_map_task_kwargs_fn: Optional[Callable[[], Dict[str, Any]]] = None
 
     @classmethod
     def get_current(cls) -> Optional["TaskContext"]:

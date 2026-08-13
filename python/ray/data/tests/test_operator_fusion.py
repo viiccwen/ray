@@ -6,6 +6,7 @@ import pytest
 
 import ray
 from ray.data._internal.execution.bundle_queue import EstimateSize
+from ray.data._internal.execution.interfaces.task_context import TaskContext
 from ray.data._internal.execution.operators.input_data_buffer import InputDataBuffer
 from ray.data._internal.execution.operators.map_operator import MapOperator
 from ray.data._internal.execution.operators.map_transformer import (
@@ -15,6 +16,7 @@ from ray.data._internal.execution.operators.map_transformer import (
 from ray.data._internal.execution.operators.shuffle_operators.shuffle_reduce_operator import (
     ShuffleReduceOp,
 )
+from ray.data._internal.execution.streaming_executor import StreamingExecutor
 from ray.data._internal.logical.interfaces import LogicalPlan
 from ray.data._internal.logical.operators import (
     Filter,
@@ -26,7 +28,11 @@ from ray.data._internal.logical.operators import (
     Read,
     Write,
 )
-from ray.data._internal.logical.optimizers import PhysicalOptimizer, get_execution_plan
+from ray.data._internal.logical.optimizers import (
+    LogicalOptimizer,
+    PhysicalOptimizer,
+    get_execution_plan,
+)
 from ray.data._internal.planner import create_planner
 from ray.data._internal.stats import DatasetStats
 from ray.data._internal.util import rows_same
@@ -64,24 +70,98 @@ def test_read_map_batches_operator_fusion(ray_start_regular_shared_2_cpus):
     assert physical_op._logical_operators == [read_op, op]
 
 
-def test_map_with_task_kwargs_not_fused_with_all_to_all(
-    ray_start_regular_shared_2_cpus, restore_data_context
+@pytest.mark.parametrize(
+    "shuffle_strategy",
+    [
+        ShuffleStrategy.SORT_SHUFFLE_PULL_BASED,
+        ShuffleStrategy.SORT_SHUFFLE_PUSH_BASED,
+    ],
+)
+@pytest.mark.parametrize("all_to_all_op", ["random_shuffle", "repartition"])
+def test_map_with_task_kwargs_fused_with_all_to_all(
+    ray_start_regular_shared_2_cpus,
+    restore_data_context,
+    shuffle_strategy,
+    all_to_all_op,
 ):
-    DataContext.get_current().enable_dereference_object_refs_in_fn_args = True
+    ctx = DataContext.get_current()
+    ctx.shuffle_strategy = shuffle_strategy
+    ctx.enable_dereference_object_refs_in_fn_args = True
 
     def map_fn(row, arg):
         assert arg == 1
         return row
 
-    ds = (
-        ray.data.range(1)
-        .map(map_fn, fn_args=(ray.put(1),))
-        .random_shuffle()
-        .materialize()
-    )
+    ds = ray.data.range(10).map(map_fn, fn_args=(ray.put(1),))
+    if all_to_all_op == "random_shuffle":
+        ds = ds.random_shuffle()
+        expected_op_name = "RandomShuffle"
+    else:
+        ds = ds.repartition(2, shuffle=True)
+        expected_op_name = "Repartition"
+    ds = ds.materialize()
 
-    assert ds.take_all() == [{"id": 0}]
-    assert "Map(map_fn)->RandomShuffle" not in ds.stats()
+    assert sorted(extract_values("id", ds.take_all())) == list(range(10))
+    assert f"Map(map_fn)->{expected_op_name}" in ds.stats()
+
+
+@pytest.mark.parametrize(
+    "shuffle_strategy",
+    [
+        ShuffleStrategy.SORT_SHUFFLE_PULL_BASED,
+        ShuffleStrategy.SORT_SHUFFLE_PUSH_BASED,
+    ],
+)
+@pytest.mark.parametrize("all_to_all_op", ["random_shuffle", "repartition"])
+def test_dynamic_map_task_kwargs_fused_with_all_to_all(
+    ray_start_regular_shared_2_cpus,
+    restore_data_context,
+    shuffle_strategy,
+    all_to_all_op,
+):
+    ctx = DataContext.get_current()
+    ctx.shuffle_strategy = shuffle_strategy
+
+    def map_fn(row):
+        task_ctx = TaskContext.get_current()
+        assert task_ctx is not None
+        assert set(task_ctx.kwargs) == {"block", "random_seed", "map_fn"}
+        assert not any(
+            isinstance(value, ray.ObjectRef) for value in task_ctx.kwargs.values()
+        )
+        assert task_ctx.kwargs["random_seed"] == task_ctx.kwargs["block"] + 1
+        assert task_ctx.kwargs["map_fn"] == "resolved"
+        return row
+
+    ds = ray.data.range(10).map(map_fn)
+    if all_to_all_op == "random_shuffle":
+        ds = ds.random_shuffle()
+        expected_op_name = "RandomShuffle"
+    else:
+        ds = ds.repartition(2, shuffle=True)
+        expected_op_name = "Repartition"
+    logical_plan = LogicalOptimizer().optimize(ds._logical_plan)
+    physical_plan, _ = create_planner().plan(logical_plan)
+    map_op = physical_plan.dag.input_dependencies[0]
+    callback_values = []
+
+    def map_task_kwargs_fn():
+        value = len(callback_values)
+        callback_values.append(value)
+        return {
+            "block": ray.put(value),
+            "random_seed": ray.put(value + 1),
+            "map_fn": ray.put("resolved"),
+        }
+
+    map_op.add_map_task_kwargs_fn(map_task_kwargs_fn)
+    physical_plan = PhysicalOptimizer().optimize(physical_plan)
+    assert f"Map(map_fn)->{expected_op_name}" in physical_plan.dag.name
+
+    executor = StreamingExecutor(ctx)
+    list(executor.execute(physical_plan.dag))
+
+    assert len(callback_values) > 1
 
 
 def test_read_map_chain_operator_fusion(ray_start_regular_shared_2_cpus):

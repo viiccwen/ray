@@ -1,12 +1,15 @@
 import logging
 import math
-from typing import Callable, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 
 from ray.data._internal.delegating_block_builder import DelegatingBlockBuilder
 from ray.data._internal.execution.interfaces.task_context import TaskContext
-from ray.data._internal.planner.exchange.interfaces import ExchangeTaskSpec
+from ray.data._internal.planner.exchange.interfaces import (
+    ExchangeTaskSpec,
+    decode_map_task_kwargs,
+)
 from ray.data.block import (
     Block,
     BlockAccessor,
@@ -33,7 +36,9 @@ class ShuffleTaskSpec(ExchangeTaskSpec):
         target_shuffle_max_block_size: int,
         random_shuffle: bool = False,
         random_seed: Optional[int] = None,
-        upstream_map_fn: Optional[Callable[[Iterable[Block]], Iterable[Block]]] = None,
+        upstream_map_fn: Optional[
+            Callable[[Iterable[Block], TaskContext], Iterable[Block]]
+        ] = None,
     ):
         super().__init__(
             map_args=[
@@ -51,20 +56,28 @@ class ShuffleTaskSpec(ExchangeTaskSpec):
         block: Block,
         output_num_blocks: int,
         target_shuffle_max_block_size: int,
-        upstream_map_fn: Optional[Callable[[Iterable[Block]], Iterable[Block]]],
+        upstream_map_fn: Optional[
+            Callable[[Iterable[Block], TaskContext], Iterable[Block]]
+        ],
         random_shuffle: bool,
         random_seed: Optional[int],
+        **map_task_kwargs: Any,
     ) -> List[Union[Block, "BlockMetadataWithSchema"]]:
         stats = BlockExecStats.builder()
         if upstream_map_fn:
+            map_task_kwargs = decode_map_task_kwargs(map_task_kwargs)
             # Create a local TaskContext for the upstream map function.
             # May be used by expressions that depend on task-level state.
-            local_ctx = TaskContext(task_idx=idx, op_name="shuffle_map")
+            local_ctx = TaskContext(
+                task_idx=idx,
+                op_name="shuffle_map",
+                kwargs=map_task_kwargs,
+            )
             with TaskContext.current(local_ctx):
                 # TODO: Support dynamic block splitting in
                 # all-to-all ops, to avoid having to re-fuse
                 # upstream blocks together.
-                upstream_map_iter = upstream_map_fn([block])
+                upstream_map_iter = upstream_map_fn([block], local_ctx)
                 mapped_block = next(upstream_map_iter)
                 builder = BlockAccessor.for_block(mapped_block).builder()
                 builder.add_block(mapped_block)

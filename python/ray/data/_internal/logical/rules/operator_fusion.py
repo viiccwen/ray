@@ -309,13 +309,6 @@ class FuseOperators(Rule):
         if up_op.get_additional_split_factor() > 1:
             return False
 
-        # All-to-all task submission doesn't propagate upstream map task kwargs.
-        # Keep the map operator separate so Ray can resolve those dependencies.
-        if isinstance(down_op, AllToAllOperator) and (
-            up_op._map_task_kwargs or up_op._map_task_kwargs_fns
-        ):
-            return False
-
         # If the downstream operator takes no input, it cannot be fused with
         # the upstream operator.
         if not down_logical_op.input_dependencies:
@@ -742,6 +735,17 @@ class FuseOperators(Rule):
         ray_remote_args = up_logical_op.ray_remote_args
         down_transform_fn = down_op.get_transformation_fn()
         up_map_transformer = up_op.get_map_transformer()
+        up_map_task_kwargs = up_op._map_task_kwargs.copy()
+        up_map_task_kwargs_fns = tuple(up_op._map_task_kwargs_fns)
+
+        get_upstream_map_task_kwargs = None
+        if up_map_task_kwargs or up_map_task_kwargs_fns:
+
+            def get_upstream_map_task_kwargs() -> Dict[str, Any]:
+                kwargs = up_map_task_kwargs.copy()
+                for fn in up_map_task_kwargs_fns:
+                    kwargs.update(fn())
+                return kwargs
 
         def fused_all_to_all_transform_fn(
             blocks: List[RefBundle],
@@ -752,6 +756,7 @@ class FuseOperators(Rule):
             AllToAllOperator's transform function."""
             ctx.upstream_map_transformer = up_map_transformer
             ctx.upstream_map_ray_remote_args = ray_remote_args
+            ctx.upstream_map_task_kwargs_fn = get_upstream_map_task_kwargs
             return down_transform_fn(blocks, ctx)
 
         # Make the upstream operator's inputs the new, fused operator's inputs.

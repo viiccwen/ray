@@ -46,9 +46,9 @@ def generate_repartition_fn(
             #       transformation to avoid unnecessary block shaping (if any)
             map_transformer.override_target_max_block_size(None)
 
-            def upstream_map_fn(blocks):
+            def upstream_map_fn(blocks, task_ctx):
                 DataContext._set_current(data_context)
-                return map_transformer.apply_transform(blocks, ctx)
+                return map_transformer.apply_transform(blocks, task_ctx)
 
         shuffle_spec = ShuffleTaskSpec(
             target_shuffle_max_block_size=(
@@ -71,6 +71,7 @@ def generate_repartition_fn(
             num_outputs,
             ctx,
             map_ray_remote_args=map_ray_remote_args,
+            map_task_kwargs_fn=ctx.upstream_map_task_kwargs_fn,
             reduce_ray_remote_args=reduce_ray_remote_args,
             _debug_limit_execution_to_num_blocks=(
                 _debug_limit_shuffle_execution_to_num_blocks

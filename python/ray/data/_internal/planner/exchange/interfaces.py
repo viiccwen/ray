@@ -1,5 +1,5 @@
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import ray._private.worker
 from ray.data._internal.execution.interfaces import RefBundle
@@ -13,6 +13,32 @@ if TYPE_CHECKING:
     from ray.data.block import BlockMetadataWithSchema
 
 logger = logging.getLogger(__name__)
+
+_MAP_TASK_KWARG_KEYS = "__ray_data_map_task_kwarg_keys"
+_MAP_TASK_KWARG_PREFIX = "__ray_data_map_task_kwarg_"
+
+
+def encode_map_task_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Encode task kwargs as collision-free top-level remote arguments."""
+    encoded = {_MAP_TASK_KWARG_KEYS: tuple(kwargs)}
+    encoded.update(
+        {
+            f"{_MAP_TASK_KWARG_PREFIX}{index}": value
+            for index, value in enumerate(kwargs.values())
+        }
+    )
+    return encoded
+
+
+def decode_map_task_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Restore task kwargs encoded by :func:`encode_map_task_kwargs`."""
+    keys = kwargs.pop(_MAP_TASK_KWARG_KEYS, ())
+    decoded = {
+        key: kwargs.pop(f"{_MAP_TASK_KWARG_PREFIX}{index}")
+        for index, key in enumerate(keys)
+    }
+    assert not kwargs, f"Unexpected encoded map task kwargs: {kwargs.keys()}"
+    return decoded
 
 
 class ExchangeTaskSpec:
@@ -100,6 +126,7 @@ class ExchangeTaskScheduler:
         map_ray_remote_args: Optional[Dict[str, Any]] = None,
         reduce_ray_remote_args: Optional[Dict[str, Any]] = None,
         warn_on_driver_memory_usage: Optional[int] = None,
+        map_task_kwargs_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> Tuple[List[RefBundle], StatsDict]:
         """
         Execute the exchange tasks on input `refs`.

@@ -1,6 +1,16 @@
 import logging
 import math
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 import ray
 from ray._private.ray_constants import CALLER_MEMORY_USAGE_PER_OBJECT_REF
@@ -8,6 +18,7 @@ from ray.data._internal.execution.interfaces import BlockEntry, RefBundle, TaskC
 from ray.data._internal.planner.exchange.interfaces import (
     ExchangeTaskScheduler,
     ExchangeTaskSpec,
+    encode_map_task_kwargs,
 )
 from ray.data._internal.remote_fn import cached_remote_fn
 from ray.data._internal.stats import StatsDict
@@ -242,10 +253,11 @@ class _PipelinedStageExecutor:
 
 
 class _MapStageIterator:
-    def __init__(self, input_blocks_list, shuffle_map, map_args):
+    def __init__(self, input_blocks_list, shuffle_map, map_args, map_task_kwargs_fn):
         self._input_blocks_list = input_blocks_list
         self._shuffle_map = shuffle_map
         self._map_args = map_args
+        self._map_task_kwargs_fn = map_task_kwargs_fn
 
         self._mapper_idx = 0
         self._map_results = []
@@ -267,6 +279,11 @@ class _MapStageIterator:
             self._mapper_idx,
             block,
             *self._map_args,
+            **(
+                encode_map_task_kwargs(self._map_task_kwargs_fn())
+                if self._map_task_kwargs_fn
+                else {}
+            ),
         )
         metadata_schema_ref = map_result.pop(-1)
         self._map_results.append(map_result)
@@ -455,6 +472,7 @@ class PushBasedShuffleTaskScheduler(ExchangeTaskScheduler):
         reduce_ray_remote_args: Optional[Dict[str, Any]] = None,
         merge_factor: float = 2,
         _debug_limit_execution_to_num_blocks: int = None,
+        map_task_kwargs_fn: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> Tuple[List[RefBundle], StatsDict]:
         logger.debug("Using experimental push-based shuffle.")
         # TODO: Preemptively clear the blocks list since we will incrementally delete
@@ -532,6 +550,7 @@ class PushBasedShuffleTaskScheduler(ExchangeTaskScheduler):
             input_blocks_list,
             shuffle_map,
             [output_num_blocks, stage.merge_schedule, *self._exchange_spec._map_args],
+            map_task_kwargs_fn,
         )
 
         sub_progress_bar_dict = task_ctx.sub_progress_bar_dict
@@ -673,8 +692,15 @@ class PushBasedShuffleTaskScheduler(ExchangeTaskScheduler):
         output_num_blocks: int,
         schedule: _MergeTaskSchedule,
         *map_args: List[Any],
+        **map_task_kwargs: Any,
     ) -> List[Union[Block, "BlockMetadataWithSchema"]]:
-        mapper_outputs = map_fn(idx, block, output_num_blocks, *map_args)
+        mapper_outputs = map_fn(
+            idx,
+            block,
+            output_num_blocks,
+            *map_args,
+            **map_task_kwargs,
+        )
 
         # A merge task may produce results for multiple downstream reducer
         # tasks. Therefore, each map task should give each merge task a
